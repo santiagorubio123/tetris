@@ -1,0 +1,273 @@
+import pygame
+import random
+import sys
+from collections import deque
+
+
+# Configuración general
+COLS, ROWS = 10, 20
+BLOCK = 32  # tamaño de cada celda en píxeles
+BORDER = 12
+SIDEBAR = 200
+WIDTH = COLS * BLOCK + SIDEBAR + BORDER * 2
+HEIGHT = ROWS * BLOCK + BORDER * 2
+FPS = 60
+
+# Colores
+BLACK = (18, 18, 20)
+GRAY = (40, 42, 46)
+LIGHT_GRAY = (70, 74, 79)
+WHITE = (240, 240, 240)
+GHOST = (200, 200, 200)
+
+COLORS = {
+    'I': (0, 180, 220),
+    'J': (0, 90, 200),
+    'L': (255, 140, 0),
+    'O': (240, 220, 0),
+    'S': (0, 200, 120),
+    'T': (180, 0, 200),
+    'Z': (230, 40, 60),
+}
+
+# Piezas (rotaciones como matrices 4x4). 1 = bloque lleno
+SHAPES = {
+    'I': [
+        [[0,0,0,0],
+         [1,1,1,1],
+         [0,0,0,0],
+         [0,0,0,0]],
+        [[0,0,1,0],
+         [0,0,1,0],
+         [0,0,1,0],
+         [0,0,1,0]],
+    ],
+    'J': [
+        [[1,0,0],
+         [1,1,1],
+         [0,0,0]],
+        [[0,1,1],
+         [0,1,0],
+         [0,1,0]],
+        [[0,0,0],
+         [1,1,1],
+         [0,0,1]],
+        [[0,1,0],
+         [0,1,0],
+         [1,1,0]],
+    ],
+    'L': [
+        [[0,0,1],
+         [1,1,1],
+         [0,0,0]],
+        [[0,1,0],
+         [0,1,0],
+         [0,1,1]],
+        [[0,0,0],
+         [1,1,1],
+         [1,0,0]],
+        [[1,1,0],
+         [0,1,0],
+         [0,1,0]],
+    ],
+    'O': [
+        [[1,1],
+         [1,1]],
+    ],
+    'S': [
+        [[0,1,1],
+         [1,1,0],
+         [0,0,0]],
+        [[0,1,0],
+         [0,1,1],
+         [0,0,1]],
+    ],
+    'T': [
+        [[0,1,0],
+         [1,1,1],
+         [0,0,0]],
+        [[0,1,0],
+         [0,1,1],
+         [0,1,0]],
+        [[0,0,0],
+         [1,1,1],
+         [0,1,0]],
+        [[0,1,0],
+         [1,1,0],
+         [0,1,0]],
+    ],
+    'Z': [
+        [[1,1,0],
+         [0,1,1],
+         [0,0,0]],
+        [[0,0,1],
+         [0,1,1],
+         [0,1,0]],
+    ],
+}
+
+# ----------------------------
+# Utilidades
+# ----------------------------
+
+def rotate_matrix(mat):
+    # Rota 90º clockwise
+    return [list(row) for row in zip(*mat[::-1])]
+
+
+def matrix_size(mat):
+    return len(mat[0]), len(mat)
+
+
+class Piece:
+    def __init__(self, kind):
+        self.kind = kind
+        self.color = COLORS[kind]
+        # Usa lista de rotaciones predefinidas; genera las faltantes por rotación
+        base_rots = SHAPES[kind]
+        rots = []
+        seen = set()
+        m = base_rots[0]
+        # Genera hasta 4 rotaciones únicas
+        cur = m
+        for _ in range(4):
+            key = tuple(tuple(r) for r in cur)
+            if key not in seen:
+                seen.add(key)
+                rots.append(cur)
+            cur = rotate_matrix(cur)
+        self.rotations = rots
+        self.r = 0
+        self.x = COLS // 2 - 2
+        self.y = -2  # empieza sobre el tablero
+
+    @property
+    def shape(self):
+        return self.rotations[self.r]
+
+    def cells(self, ox=None, oy=None, rot=None):
+        shape = self.rotations[self.r if rot is None else rot]
+        px = self.x if ox is None else ox
+        py = self.y if oy is None else oy
+        for j, row in enumerate(shape):
+            for i, v in enumerate(row):
+                if v:
+                    yield px + i, py + j
+
+
+class Bag7:
+    def __init__(self):
+        self.bag = deque()
+        self.refill()
+
+    def refill(self):
+        kinds = list(SHAPES.keys())
+        random.shuffle(kinds)
+        self.bag.extend(kinds)
+
+    def pop(self):
+        if not self.bag:
+            self.refill()
+        return self.bag.popleft()
+
+
+class Board:
+    def __init__(self):
+        self.grid = [[None for _ in range(COLS)] for _ in range(ROWS)]
+        self.score = 0
+        self.lines = 0
+        self.level = 1
+
+    def inside(self, x, y):
+        return 0 <= x < COLS and y < ROWS
+
+    def empty(self, x, y):
+        return y < 0 or (self.inside(x, y) and self.grid[y][x] is None)
+
+    def collision(self, piece, ox=None, oy=None, rot=None):
+        for x, y in piece.cells(ox, oy, rot):
+            if x < 0 or x >= COLS or y >= ROWS:
+                return True
+            if y >= 0 and self.grid[y][x] is not None:
+                return True
+        return False
+
+    def lock(self, piece):
+        for x, y in piece.cells():
+            if y < 0:
+                return False  # game over
+            self.grid[y][x] = piece.color
+        cleared = self.clear_lines()
+        self.update_score(cleared)
+        return True
+
+    def clear_lines(self):
+        new_grid = [row for row in self.grid if any(c is None for c in row)]
+        cleared = ROWS - len(new_grid)
+        if cleared:
+            for _ in range(cleared):
+                new_grid.insert(0, [None for _ in range(COLS)])
+            self.grid = new_grid
+        return cleared
+
+    def update_score(self, cleared):
+        # Puntuación clásica aproximada
+        if cleared == 1:
+            self.score += 40 * self.level
+        elif cleared == 2:
+            self.score += 100 * self.level
+        elif cleared == 3:
+            self.score += 300 * self.level
+        elif cleared == 4:
+            self.score += 1200 * self.level
+        self.lines += cleared
+        # Subir nivel cada 10 líneas
+        self.level = 1 + self.lines // 10
+
+    def ghost_drop_y(self, piece):
+        y = piece.y
+        while not self.collision(piece, piece.x, y + 1):
+            y += 1
+        return y
+
+
+# ----------------------------
+# Juego
+# ----------------------------
+FALL_EVENT = pygame.USEREVENT + 1
+MOVE_REPEAT_EVENT = pygame.USEREVENT + 2
+
+
+def fall_delay_ms(level):
+    # Basado vagamente en velocidades de tetris: más nivel, más rápido
+    # Evita que llegue a 0
+    base = max(60, 700 - (level - 1) * 60)
+    return base
+
+
+def draw_block(screen, x, y, color, alpha=255):
+    px = BORDER + x * BLOCK
+    py = BORDER + y * BLOCK
+    rect = pygame.Rect(px, py, BLOCK - 1, BLOCK - 1)
+    if alpha != 255:
+        surf = pygame.Surface((BLOCK - 1, BLOCK - 1), pygame.SRCALPHA)
+        r, g, b = color
+        surf.fill((r, g, b, alpha))
+        screen.blit(surf, rect)
+    else:
+        pygame.draw.rect(screen, color, rect, border_radius=6)
+
+
+def draw_grid(screen, board):
+    # fondo tablero
+    pygame.draw.rect(screen, GRAY, (BORDER, BORDER, COLS * BLOCK, ROWS * BLOCK), border_radius=10)
+    # líneas sutiles
+    for y in range(ROWS):
+        for x in range(COLS):
+            cell = board.grid[y][x]
+            if cell:
+                draw_block(screen, x, y, cell)
+            else:
+                rx = BORDER + x * BLOCK
+                ry = BORDER + y * BLOCK
+                pygame.draw.rect(screen, LIGHT_GRAY, (rx, ry, BLOCK - 1, BLOCK - 1), width=1, border_radius=4)
